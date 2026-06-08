@@ -130,7 +130,7 @@ def iso(value):
 def sql_string(value):
     if value is None:
         return "NULL"
-    return "N'" + str(value).replace("'", "''") + "'"
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def sql_datetime(value):
@@ -138,7 +138,7 @@ def sql_datetime(value):
         text = value.isoformat(timespec="milliseconds")
     else:
         text = iso(value)
-    return "NULL" if text is None else f"CONVERT(datetime2(3), '{text}', 126)"
+    return "NULL" if text is None else f"'{text.replace('T', ' ')}'"
 
 
 def sql_number(value):
@@ -405,7 +405,7 @@ def emit_insert_values(lines, table, columns, rows, batch_size=200):
         batch = rows[idx:idx + batch_size]
         if not batch:
             continue
-        lines.append(f"INSERT INTO dbo.{table} ({', '.join(columns)}) VALUES")
+        lines.append(f"INSERT INTO {table} ({', '.join(columns)}) VALUES")
         lines.append(",\n".join("(" + ", ".join(row) + ")" for row in batch) + ";")
 
 
@@ -416,32 +416,27 @@ def maybe_raw_json(obj, include_raw_json):
 def build_sql(files, include_fit_messages=False, include_raw_json=False):
     lines = [
         "USE MotionAnalysis;",
-        "GO",
-        "SET NOCOUNT ON;",
-        "GO",
+        "SET FOREIGN_KEY_CHECKS = 1;",
     ]
     for item in files:
         path = item["path"]
         sf_hash = item["hash"]
         size = path.stat().st_size
         lines.extend([
-            f"PRINT N'Importing {path.name}';",
-            "BEGIN TRANSACTION;",
-            f"IF EXISTS (SELECT 1 FROM dbo.SourceFiles WHERE file_hash = '{sf_hash}')",
-            "BEGIN",
-            "    DECLARE @old_source_file_id INT = (SELECT id FROM dbo.SourceFiles WHERE file_hash = '" + sf_hash + "');",
-            "    DELETE FROM dbo.SourceFiles WHERE id = @old_source_file_id;",
-            "END",
-            "DECLARE @source_file_id INT;",
-            "DECLARE @activity_id INT;",
-            "INSERT INTO dbo.SourceFiles (file_name, file_path, file_size_bytes, file_hash) VALUES ("
-            + ", ".join([sql_string(path.name), sql_string(str(path.resolve())), sql_int(size), sql_string(sf_hash).replace("N'", "'")])
+            f"SELECT 'Importing {path.name}' AS status;",
+            "START TRANSACTION;",
+            f"SET @old_source_file_id = (SELECT id FROM SourceFiles WHERE file_hash = '{sf_hash}' LIMIT 1);",
+            "DELETE FROM SourceFiles WHERE id = @old_source_file_id;",
+            "SET @source_file_id = NULL;",
+            "SET @activity_id = NULL;",
+            "INSERT INTO SourceFiles (file_name, file_path, file_size_bytes, file_hash) VALUES ("
+            + ", ".join([sql_string(path.name), sql_string(str(path)), sql_int(size), sql_string(sf_hash)])
             + ");",
-            "SET @source_file_id = SCOPE_IDENTITY();",
+            "SET @source_file_id = LAST_INSERT_ID();",
         ])
         activity = item["activity"]
         lines.append(
-            "INSERT INTO dbo.Activities (source_file_id, activity_key, activity_type, start_time_utc, raw_json) VALUES ("
+            "INSERT INTO Activities (source_file_id, activity_key, activity_type, start_time_utc, raw_json) VALUES ("
             + ", ".join([
                 "@source_file_id",
                 sql_string(activity["key"]),
@@ -451,7 +446,7 @@ def build_sql(files, include_fit_messages=False, include_raw_json=False):
             ])
             + ");"
         )
-        lines.append("SET @activity_id = SCOPE_IDENTITY();")
+        lines.append("SET @activity_id = LAST_INSERT_ID();")
 
         session_rows = []
         for message in item["sessions"]:
@@ -563,7 +558,7 @@ def build_sql(files, include_fit_messages=False, include_raw_json=False):
                 "local_message_num", "message_time_utc", "raw_json",
             ], msg_rows, 200)
 
-        lines.extend(["COMMIT TRANSACTION;", "GO"])
+        lines.extend(["COMMIT;"])
     return "\n".join(lines) + "\n"
 
 
